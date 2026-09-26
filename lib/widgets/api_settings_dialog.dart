@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../services/groq_service.dart';
+import '../services/hybrid_ai_service.dart';
 import '../services/local_llm_service.dart';
 import '../theme/app_theme.dart';
 
@@ -173,15 +175,22 @@ class _ApiSettingsDialogState extends State<ApiSettingsDialog> {
           child: const Text('Cancel', style: TextStyle(color: AppTheme.textMuted)),
         ),
         ElevatedButton(
-          onPressed: () {
-            GroqService().updateCredentials(
-              newKey: _keyController.text,
+          onPressed: () async {
+            final newKey = _keyController.text.trim();
+            await GroqService().updateCredentials(
+              newKey: newKey,
               newModel: _modelController.text,
             );
-            Navigator.pop(context);
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Settings updated successfully!')),
-            );
+            if (context.mounted) {
+              final hybrid = context.read<HybridAiService>();
+              if (newKey.startsWith('gsk_')) {
+                hybrid.setEngineMode(AiEngineMode.cloudBoost);
+              }
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Settings updated successfully!')),
+              );
+            }
           },
           style: ElevatedButton.styleFrom(
             backgroundColor: AppTheme.primaryViolet,

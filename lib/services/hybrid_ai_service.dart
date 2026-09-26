@@ -13,16 +13,17 @@ class HybridAiService extends ChangeNotifier {
   final GroqService _groq = GroqService();
   final LocalLlmService _localLlm = LocalLlmService();
 
-  AiEngineMode _currentMode = AiEngineMode.cloudBoost; // Default to Cloud Boost for lightning demo
+  AiEngineMode _currentMode = AiEngineMode.cloudBoost; // Default to Cloud Boost, auto-fallback to Edge if no key
 
   AiEngineMode get currentMode => _currentMode;
   bool get isCloudBoost => _currentMode == AiEngineMode.cloudBoost;
   bool get isEdgeOffline => _currentMode == AiEngineMode.edgeOffline;
 
   String get activeEngineLabel {
-    return isCloudBoost
-        ? '🚀 Cloud Boost: Groq LPU (GPT-OSS-20B)'
-        : '⚡ Edge-First: On-Device / Offline (₹0 Cost)';
+    if (isCloudBoost && _groq.hasValidKey) {
+      return '🚀 Cloud Boost: Groq LPU (${_groq.model})';
+    }
+    return '⚡ Edge-First: On-Device / Offline (₹0 Cost)';
   }
 
   void toggleEngineMode() {
@@ -37,13 +38,24 @@ class HybridAiService extends ChangeNotifier {
     }
   }
 
-  /// Master streaming dispatch with zero-drop rate-limit failover
+  /// Master streaming dispatch with zero-drop failover
   Stream<String> generateStream({
     required String systemPrompt,
     required String userPrompt,
     double temperature = 0.5,
     int maxTokens = 1500,
   }) async* {
+    // If Cloud Boost is requested but no key is configured, seamlessly execute Edge engine
+    if (isCloudBoost && !_groq.hasValidKey) {
+      yield* _localLlm.generateStream(
+        systemPrompt: systemPrompt,
+        userPrompt: userPrompt,
+        temperature: temperature,
+        maxTokens: maxTokens,
+      );
+      return;
+    }
+
     if (isCloudBoost) {
       bool needEdgeFailover = false;
       bool yieldedAnyCloudToken = false;
@@ -55,8 +67,10 @@ class HybridAiService extends ChangeNotifier {
           temperature: temperature,
           maxTokens: maxTokens,
         )) {
-          if (chunk.contains('__RATE_LIMIT_429__') ||
-              chunk.contains('Groq API Error (429)') ||
+          if (chunk.contains('__EDGE_FAILOVER__') ||
+              chunk.contains('__RATE_LIMIT_429__') ||
+              chunk.contains('Groq API Error') ||
+              chunk.contains('invalid_api_key') ||
               chunk.contains('rate_limit_exceeded')) {
             needEdgeFailover = true;
             break;
@@ -72,7 +86,6 @@ class HybridAiService extends ChangeNotifier {
         if (yieldedAnyCloudToken) {
           yield '\n\n';
         }
-        yield '> ⚡ **Edge Auto-Failover Active**: Groq LPU rate limit encountered. UniPilot instantly switched to the **On-Device Edge Engine (₹0 Cost / Zero Latency)** to guarantee seamless advising.\n\n';
         yield* _localLlm.generateStream(
           systemPrompt: systemPrompt,
           userPrompt: userPrompt,
@@ -102,4 +115,3 @@ class HybridAiService extends ChangeNotifier {
     return buffer.toString();
   }
 }
-

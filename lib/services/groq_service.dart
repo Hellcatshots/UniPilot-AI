@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class GroqService {
   static final GroqService _instance = GroqService._internal();
@@ -19,11 +20,32 @@ class GroqService {
     'qwen/qwen3.8-27b',
   ];
 
-  void updateCredentials({required String newKey, String? newModel}) {
+  bool get hasValidKey => apiKey.trim().isNotEmpty && apiKey.trim().startsWith('gsk_');
+
+  Future<void> init() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedKey = prefs.getString('groq_api_key');
+      if (savedKey != null && savedKey.trim().isNotEmpty) {
+        apiKey = savedKey.trim();
+      }
+      final savedModel = prefs.getString('groq_model');
+      if (savedModel != null && savedModel.trim().isNotEmpty) {
+        model = savedModel.trim();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> updateCredentials({required String newKey, String? newModel}) async {
     apiKey = newKey.trim();
     if (newModel != null && newModel.isNotEmpty) {
       model = newModel.trim();
     }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('groq_api_key', apiKey);
+      await prefs.setString('groq_model', model);
+    } catch (_) {}
   }
 
   /// Generate non-streaming response with automatic model fallback
@@ -33,6 +55,10 @@ class GroqService {
     double temperature = 0.5,
     int maxTokens = 1500,
   }) async {
+    if (!hasValidKey) {
+      return '__EDGE_FAILOVER__';
+    }
+
     final candidateModels = [
       model,
       ...availableModels.where((m) => m != model),
@@ -69,13 +95,14 @@ class GroqService {
           debugPrint('Groq 429 rate limit on $candidate, trying next model in pool...');
           continue; // Try next model in pool
         } else {
-          return 'Groq API Error (${response.statusCode}): ${response.body}';
+          debugPrint('Groq API Error (${response.statusCode}): ${response.body}');
+          return '__EDGE_FAILOVER__';
         }
       } catch (e) {
         debugPrint('GroqService error on $candidate: $e');
       }
     }
-    return '__RATE_LIMIT_429__';
+    return '__EDGE_FAILOVER__';
   }
 
   /// Generate streaming response with automatic model fallback
@@ -85,6 +112,11 @@ class GroqService {
     double temperature = 0.5,
     int maxTokens = 1500,
   }) async* {
+    if (!hasValidKey) {
+      yield '__EDGE_FAILOVER__';
+      return;
+    }
+
     final candidateModels = [
       model,
       ...availableModels.where((m) => m != model),
@@ -123,8 +155,9 @@ class GroqService {
 
         if (response.statusCode != 200) {
           final errBody = await response.stream.bytesToString();
+          debugPrint('Groq API stream Error (${response.statusCode}): $errBody');
           client.close();
-          yield 'Groq API Error (${response.statusCode}): $errBody';
+          yield '__EDGE_FAILOVER__';
           return;
         }
 
@@ -162,9 +195,7 @@ class GroqService {
     }
 
     if (!succeeded) {
-      // Signal rate limit failover to hybrid service
-      yield '__RATE_LIMIT_429__';
+      yield '__EDGE_FAILOVER__';
     }
   }
 }
-
